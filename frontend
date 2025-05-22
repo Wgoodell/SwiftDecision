@@ -1,0 +1,510 @@
+import SwiftUI
+import CoreLocation
+
+// MARK: - Data Models
+
+/// Restaurant model that conforms to Identifiable for SwiftUI list views
+struct Restaurant: Identifiable, Decodable {
+    let id: String              // Unique identifier from Yelp
+    let name: String            // Restaurant name
+    let rating: Double          // Rating from 1-5
+    let price: String?         // Price level (e.g., "$", "$$", etc.)
+    let distance: Double       // Distance in meters from user
+    let imageUrl: String?      // URL for restaurant image
+    let categories: [Category] // Types of cuisine/categories
+    let location: Location     // Address information
+    
+    // Nested category structure for restaurant types
+    struct Category: Decodable {
+        let title: String      // Category name (e.g., "Italian", "Mexican")
+    }
+    
+    // Nested location structure for address data
+    struct Location: Decodable {
+        let address1: String? // Primary address line
+        let city: String?     // City name
+    }
+    
+    /// Computed property to convert meters to miles
+    var formattedDistance: String {
+        String(format: "%.1f mi", distance * 0.000621371)
+    }
+}
+
+/// Response structure for Yelp API search results
+struct SearchResponse: Decodable {
+    let businesses: [Restaurant] // Array of restaurant results
+}
+
+// MARK: - Restaurant Manager
+
+/// ObservableObject class that manages restaurant data and API calls
+class RestaurantManager: ObservableObject {
+    @Published var restaurants: [Restaurant] = [] // Array of fetched restaurants
+    @Published var isLoading = false             // Loading state flag
+    @Published var error: String?               // Error message storage
+    @Published var selectedFilters: Set<String> = [] // Active cuisine filters
+    
+    private let apiKey = "YOUR_YELP_API_KEY"    // Yelp API key
+    private let locationManager = CLLocationManager() // For user location
+    
+    init() {
+        // Request location authorization when initialized
+        locationManager.requestWhenInUseAuthorization()
+    }
+    
+    /// Fetches restaurants from Yelp API based on current location and filters
+    func fetchRestaurants(term: String? = nil) {
+        // Ensure we have location access
+        guard let location = locationManager.location else {
+            error = "Location access required"
+            return
+        }
+        
+        isLoading = true
+        error = nil
+        
+        let latitude = location.coordinate.latitude
+        let longitude = location.coordinate.longitude
+        
+        // Build URL with query parameters
+        var urlComponents = URLComponents(string: "https://api.yelp.com/v3/businesses/search")!
+        urlComponents.queryItems = [
+            URLQueryItem(name: "latitude", value: "\(latitude)"),
+            URLQueryItem(name: "longitude", value: "\(longitude)"),
+            URLQueryItem(name: "limit", value: "20") // Limit to 20 results
+        ]
+        
+        // Add search term if provided
+        if let term = term {
+            urlComponents.queryItems?.append(URLQueryItem(name: "term", value: term))
+        }
+        
+        // Add category filters if any are selected
+        if !selectedFilters.isEmpty {
+            urlComponents.queryItems?.append(
+                URLQueryItem(name: "categories", value: selectedFilters.joined(separator: ","))
+            )
+        }
+        
+        // Create URLRequest with authorization header
+        var request = URLRequest(url: urlComponents.url!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Perform network request
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                self.isLoading = false
+                
+                // Handle errors
+                if let error = error {
+                    self.error = error.localizedDescription
+                    return
+                }
+                
+                guard let data = data else {
+                    self.error = "No data received"
+                    return
+                }
+                
+                // Decode JSON response
+                do {
+                    let result = try JSONDecoder().decode(SearchResponse.self, from: data)
+                    self.restaurants = result.businesses
+                } catch {
+                    self.error = "Failed to decode response: \(error.localizedDescription)"
+                }
+            }
+        }.resume()
+    }
+    
+    /// Toggles a cuisine filter on/off
+    func toggleFilter(_ filter: String) {
+        if selectedFilters.contains(filter) {
+            selectedFilters.remove(filter)
+        } else {
+            selectedFilters.insert(filter)
+        }
+    }
+    
+    /// Returns a random restaurant from the current results
+    func getRandomRestaurant() -> Restaurant? {
+        return restaurants.randomElement()
+    }
+}
+
+// MARK: - Main Content View
+
+/// Primary view of the app showing restaurant list and controls
+struct ContentView: View {
+    @StateObject private var manager = RestaurantManager() // Data manager
+    @State private var searchTerm = ""                   // Search text
+    @State private var showRandomPicker = false          // Random picker visibility
+    @State private var showFilters = false               // Filter sheet visibility
+    
+    // Available cuisine filters
+    let availableFilters = ["italian", "mexican", "chinese", "japanese", "american", "indian", "thai", "vegetarian"]
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                // Loading state
+                if manager.isLoading {
+                    ProgressView("Finding great options...")
+                        .scaleEffect(1.5)
+                } 
+                // Error state
+                else if let error = manager.error {
+                    ErrorView(error: error, retryAction: { manager.fetchRestaurants() })
+                } 
+                // Empty state
+                else if manager.restaurants.isEmpty {
+                    EmptyStateView(fetchAction: { manager.fetchRestaurants() })
+                } 
+                // Results state
+                else {
+                    RestaurantListView(restaurants: manager.restaurants)
+                    
+                    // Random picker overlay when active
+                    if showRandomPicker, let randomRestaurant = manager.getRandomRestaurant() {
+                        RandomPickerView(
+                            restaurant: randomRestaurant,
+                            isPresented: $showRandomPicker
+                        )
+                        .transition(.scale)
+                    }
+                }
+            }
+            .navigationTitle("Indecisive Eats")
+            .toolbar {
+                // Filter button in navigation bar
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showFilters.toggle() }) {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                }
+                
+                // "Pick for Me!" button in bottom bar
+                ToolbarItem(placement: .bottomBar) {
+                    PickForMeButton(
+                        isDisabled: manager.restaurants.isEmpty,
+                        action: {
+                            if !manager.restaurants.isEmpty {
+                                withAnimation {
+                                    showRandomPicker = true
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+            // Search functionality
+            .searchable(
+                text: $searchTerm,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search for cuisine or restaurant"
+            )
+            .onSubmit(of: .search) {
+                manager.fetchRestaurants(term: searchTerm.isEmpty ? nil : searchTerm)
+            }
+            // Filter sheet
+            .sheet(isPresented: $showFilters) {
+                FilterView(
+                    filters: availableFilters,
+                    selectedFilters: $manager.selectedFilters
+                ) {
+                    manager.fetchRestaurants(term: searchTerm.isEmpty ? nil : searchTerm)
+                }
+            }
+            // Initial data load
+            .onAppear {
+                manager.fetchRestaurants()
+            }
+        }
+    }
+}
+
+// MARK: - Subviews
+
+/// View for displaying a single restaurant row in the list
+struct RestaurantRow: View {
+    let restaurant: Restaurant
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Restaurant image (async loaded)
+            AsyncImage(url: URL(string: restaurant.imageUrl ?? "")) { image in
+                image.resizable()
+                    .aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.gray.opacity(0.3)
+            }
+            .frame(width: 80, height: 80)
+            .cornerRadius(8)
+            .clipped()
+            
+            // Restaurant details
+            VStack(alignment: .leading, spacing: 4) {
+                Text(restaurant.name)
+                    .font(.headline)
+                
+                // Rating and price
+                HStack {
+                    RatingView(rating: restaurant.rating)
+                    Text(restaurant.price ?? "")
+                        .foregroundColor(.gray)
+                }
+                
+                // Categories
+                Text(restaurant.categories.map { $0.title }.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                
+                // Address
+                Text(restaurant.location.address1 ?? "")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                
+                // Distance
+                Text(restaurant.formattedDistance)
+                    .font(.caption2)
+                    .foregroundColor(.blue)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// View for displaying star ratings
+struct RatingView: View {
+    let rating: Double // Rating from 1-5
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            // Display 5 stars, filling appropriately based on rating
+            ForEach(1..<6) { index in
+                Image(systemName: index <= Int(rating) ? "star.fill" : 
+                     (index - 1 < Int(rating) ? "star.leadinghalf.fill" : "star"))
+                    .foregroundColor(.yellow)
+                    .font(.system(size: 12))
+            }
+            // Display numeric rating
+            Text(String(format: "%.1f", rating))
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+    }
+}
+
+/// View that appears when a random restaurant is selected
+struct RandomPickerView: View {
+    let restaurant: Restaurant // The randomly selected restaurant
+    @Binding var isPresented: Bool // Controls visibility of this view
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            
+            // Header
+            Text("We chose for you!")
+                .font(.title)
+                .bold()
+            
+            // Restaurant card
+            VStack(spacing: 8) {
+                Text(restaurant.name)
+                    .font(.title2)
+                    .bold()
+                
+                // Restaurant image
+                if let url = restaurant.imageUrl {
+                    AsyncImage(url: URL(string: url)) { image in
+                        image.resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Color.gray.opacity(0.3)
+                    }
+                    .frame(height: 150)
+                    .cornerRadius(12)
+                    .padding(.horizontal)
+                }
+                
+                // Rating
+                RatingView(rating: restaurant.rating)
+                
+                // Categories
+                Text(restaurant.categories.map { $0.title }.joined(separator: ", "))
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
+                
+                // Address
+                Text(restaurant.location.address1 ?? "")
+                    .font(.subheadline)
+                
+                // Distance
+                Text(restaurant.formattedDistance)
+                    .font(.subheadline)
+                    .foregroundColor(.blue)
+            }
+            .padding()
+            .background(Color(.systemBackground))
+            .cornerRadius(16)
+            .shadow(radius: 10)
+            .padding()
+            
+            // Action buttons
+            Button("Let's go!") {
+                isPresented = false
+                // Note: In a real app, you might open Maps or another navigation app here
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            
+            Button("Pick another") {
+                isPresented = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    isPresented = true
+                }
+            }
+            .foregroundColor(.blue)
+            
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground).opacity(0.95))
+        .edgesIgnoringSafeArea(.all)
+    }
+}
+
+/// View for selecting cuisine filters
+struct FilterView: View {
+    let filters: [String]          // All available filters
+    @Binding var selectedFilters: Set<String> // Currently selected filters
+    let onApply: () -> Void        // Closure to call when filters are applied
+    
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("Cuisine Filters")) {
+                    ForEach(filters, id: \.self) { filter in
+                        Button(action: {
+                            // Toggle filter selection
+                            if selectedFilters.contains(filter) {
+                                selectedFilters.remove(filter)
+                            } else {
+                                selectedFilters.insert(filter)
+                            }
+                        }) {
+                            HStack {
+                                Text(filter.capitalized)
+                                Spacer()
+                                if selectedFilters.contains(filter) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                        .foregroundColor(.primary)
+                    }
+                }
+            }
+            .listStyle(InsetGroupedListStyle())
+            .navigationTitle("Filters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Apply") {
+                        onApply()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// View shown when there's an error
+struct ErrorView: View {
+    let error: String
+    let retryAction: () -> Void
+    
+    var body: some View {
+        VStack {
+            Text("Error: \(error)")
+                .foregroundColor(.red)
+            Button("Try Again", action: retryAction)
+                .padding()
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(8)
+        }
+    }
+}
+
+/// View shown when no restaurants are available
+struct EmptyStateView: View {
+    let fetchAction: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("No restaurants found")
+                .font(.title)
+            Text("Try adjusting your search or filters")
+                .foregroundColor(.gray)
+            Button("Find Restaurants Near Me", action: fetchAction)
+                .padding()
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(8)
+        }
+        .padding()
+    }
+}
+
+/// View for the restaurant list
+struct RestaurantListView: View {
+    let restaurants: [Restaurant]
+    
+    var body: some View {
+        List(restaurants) { restaurant in
+            RestaurantRow(restaurant: restaurant)
+        }
+        .listStyle(PlainListStyle())
+    }
+}
+
+/// Custom "Pick for Me" button
+struct PickForMeButton: View {
+    let isDisabled: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text("Pick for Me!")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(PrimaryButtonStyle())
+        .disabled(isDisabled)
+    }
+}
+
+// MARK: - Button Styles
+
+/// Custom button style for primary actions
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(Color.blue)
+            .foregroundColor(.white)
+            .cornerRadius(10)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+// MARK: - Preview Provider
+
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
+}
