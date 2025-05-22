@@ -68,7 +68,7 @@ class RestaurantManager: ObservableObject {
         let longitude = location.coordinate.longitude
         
         // Build URL with query parameters
-        var urlComponents = URLComponents(string: "https://api.yelp.com/v3/businesses/search")!
+        var urlComponents = URLComponents(string: "https://api.yelp.com/v3")!
         urlComponents.queryItems = [
             URLQueryItem(name: "latitude", value: "\(latitude)"),
             URLQueryItem(name: "longitude", value: "\(longitude)"),
